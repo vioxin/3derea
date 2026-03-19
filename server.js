@@ -10,47 +10,11 @@ app.get('/ping', (req, res) => res.send('Awake!'));
 
 const rooms = {};
 
-// カードの名前
-const cardNames = { 1: "⚔️斬撃", 2: "🛡️防御", 3: "🔨崩し", 4: "🦇呪い", 0: "🪞反射" };
-
-// 全組み合わせの勝敗ロジック [P1ダメージ, P2ダメージ, P1回復, P2回復, メッセージ]
-const matrix = {
-  '1-1': [0, 0, 0, 0, "⚔️ 斬撃同士が激突！相殺！"],
-  '1-2': [1, 0, 0, 0, "🛡️ 防御成功！攻撃側にカウンター1ダメージ！"],
-  '1-3': [0, 3, 0, 0, "⚔️ 斬撃が崩しに打ち勝った！3ダメージ！"],
-  '1-4': [1, 3, 0, 1, "⚔️ 斬撃ヒット！しかし呪いも発動！"],
-  '1-0': [3, 0, 0, 0, "🪞 反射成功！斬撃が跳ね返った！"],
-
-  '2-1': [0, 1, 0, 0, "🛡️ 防御成功！攻撃側にカウンター1ダメージ！"],
-  '2-2': [0, 0, 0, 0, "🛡️ お互いに様子見..."],
-  '2-3': [3, 0, 0, 0, "🔨 シールドブレイク！！3ダメージ！"],
-  '2-4': [1, 0, 0, 1, "🛡️ 防御貫通！呪いがじわじわ効く..."],
-  '2-0': [0, 2, 0, 0, "🪞 反射空振り！隙を突かれて2ダメージ！"],
-
-  '3-1': [3, 0, 0, 0, "⚔️ 斬撃が崩しに打ち勝った！3ダメージ！"],
-  '3-2': [0, 3, 0, 0, "🔨 シールドブレイク！！3ダメージ！"],
-  '3-3': [0, 0, 0, 0, "🔨 崩し同士が激突！相殺！"],
-  '3-4': [1, 3, 0, 1, "🔨 崩しヒット！しかし呪いも発動！"],
-  '3-0': [3, 0, 0, 0, "🪞 反射成功！崩しが跳ね返った！"],
-
-  '4-1': [3, 1, 1, 0, "⚔️ 斬撃ヒット！しかし呪いも発動！"],
-  '4-2': [0, 1, 1, 0, "🛡️ 防御貫通！呪いがじわじわ効く..."],
-  '4-3': [3, 1, 1, 0, "🔨 崩しヒット！しかし呪いも発動！"],
-  '4-4': [1, 1, 1, 1, "🦇 お互いに呪いを掛け合う..."],
-  '4-0': [0, 3, 1, 0, "🦇 反射空振り！呪い＋隙で計3ダメージ！"],
-
-  '0-1': [0, 3, 0, 0, "🪞 反射成功！斬撃が跳ね返った！"],
-  '0-2': [2, 0, 0, 0, "🪞 反射空振り！隙を突かれて2ダメージ！"],
-  '0-3': [0, 3, 0, 0, "🪞 反射成功！崩しが跳ね返った！"],
-  '0-4': [3, 0, 0, 1, "🦇 反射空振り！呪い＋隙で計3ダメージ！"],
-  '0-0': [0, 0, 0, 0, "🪞 お互いに隙を窺っている..."]
-};
-
 io.on('connection', (socket) => {
   socket.on('createRoom', () => {
     const roomId = Math.random().toString(36).substring(2, 6).toUpperCase();
     socket.join(roomId);
-    rooms[roomId] = { p1: socket.id, p2: null, p1Hp: 10, p2Hp: 10, p1Card: null, p2Card: null, isCpu: false };
+    rooms[roomId] = { p1: socket.id, p2: null, p1Hp: 3, p2Hp: 3, p1Card: null, p2Card: null, p1Judge: null, p2Judge: null, isCpu: false };
     socket.emit('roomCreated', roomId);
   });
 
@@ -58,7 +22,7 @@ io.on('connection', (socket) => {
     if (rooms[roomId] && !rooms[roomId].p2) {
       socket.join(roomId);
       rooms[roomId].p2 = socket.id;
-      io.to(roomId).emit('gameStart', '対人戦が始まりました！');
+      io.to(roomId).emit('gameStart', '審判の時が来た。真実か嘘かを見破れ。');
     } else {
       socket.emit('errorMsg', '部屋がないか、満室です');
     }
@@ -67,51 +31,83 @@ io.on('connection', (socket) => {
   socket.on('playCPU', () => {
     const roomId = 'CPU_' + socket.id;
     socket.join(roomId);
-    rooms[roomId] = { p1: socket.id, p2: 'CPU', p1Hp: 10, p2Hp: 10, p1Card: null, p2Card: null, isCpu: true };
-    socket.emit('gameStart', 'CPU戦が始まりました！');
+    rooms[roomId] = { p1: socket.id, p2: 'CPU', p1Hp: 3, p2Hp: 3, p1Card: null, p2Card: null, p1Judge: null, p2Judge: null, isCpu: true };
+    socket.emit('gameStart', 'CPUとの審判が始まった...。');
   });
 
-  socket.on('playCard', ({ roomId, card }) => {
+  // ① カードを伏せるフェーズ
+  socket.on('faceDownCard', ({ roomId, card }) => {
     const room = rooms[roomId];
     if (!room) return;
-
-    if (socket.id === room.p1) room.p1Card = card;
-    if (socket.id === room.p2) room.p2Card = card;
+    if (socket.id === room.p1) room.p1Card = parseInt(card); // 0=Bluff, 1=Attack
+    if (socket.id === room.p2) room.p2Card = parseInt(card);
 
     if (room.isCpu && socket.id === room.p1) {
-      const cpuCards = [0, 1, 2, 3, 4];
-      room.p2Card = cpuCards[Math.floor(Math.random() * cpuCards.length)];
+      room.p2Card = Math.floor(Math.random() * 2); // CPUはランダムに伏せる
     }
 
+    // 両者が伏せたら、判定フェーズへ移行
     if (room.p1Card !== null && room.p2Card !== null) {
+      io.to(roomId).emit('judgementPhase');
+    }
+  });
+
+  // ② 判定（真実か嘘か）を送るフェーズ
+  socket.on('submitJudgement', ({ roomId, judgement }) => {
+    const room = rooms[roomId];
+    if (!room) return;
+    if (socket.id === room.p1) room.p1Judge = parseInt(judgement); // 1=Truth, 0=Lie
+    if (socket.id === room.p2) room.p2Judge = parseInt(judgement);
+
+    if (room.isCpu && socket.id === room.p1) {
+      room.p2Judge = Math.floor(Math.random() * 2); // CPUはランダムに判定
+    }
+
+    // 両者が判定を送ったら、解決フェーズへ移行
+    if (room.p1Judge !== null && room.p2Judge !== null) {
       resolveTurn(roomId);
     }
   });
 
   function resolveTurn(roomId) {
     const room = rooms[roomId];
-    const c1 = room.p1Card; 
-    const c2 = room.p2Card;
+    const c1 = room.p1Card; const c2 = room.p2Card;
+    const j1 = room.p1Judge; const j2 = room.p2Judge;
+    let p1Dmg = 0; let p2Dmg = 0;
+    let m = "";
+
+    // 勝敗判定ロジック（マトリックス）
     
-    // マトリックスから結果を取得
-    const result = matrix[`${c1}-${c2}`];
-    const p1Dmg = result[0];
-    const p2Dmg = result[1];
-    const p1Heal = result[2];
-    const p2Heal = result[3];
-    const msg = result[4];
+    // P1の判定結果 (相手のカードc2をどう読んだかj1)
+    if (j1 === 1) { // P1「相手c2は『真実』だ！」
+      if (c2 === 1) { p2Dmg += 1; m += "⚔️P1カウンター成功！ "; } // 当たり
+      else { p1Dmg += 1; m += "💀P1はブラフに釣られた！ "; } // ハズレ
+    } else { // P1「相手c2は『嘘』だ！」
+      if (c2 === 0) { p2Dmg += 1; m += "🧠P1は嘘を見破った！ "; } // 当たり
+      else { p1Dmg += 1; m += "🗡️P1は正直な攻撃を受けた！ "; } // ハズレ
+    }
 
-    // HP計算（最大10）
-    room.p1Hp = Math.min(10, room.p1Hp - p1Dmg + p1Heal);
-    room.p2Hp = Math.min(10, room.p2Hp - p2Dmg + p2Heal);
+    // P2の判定結果 (相手のカードc1をどう読んだかj2)
+    if (j2 === 1) { // P2「相手c1は『真実』だ！」
+      if (c1 === 1) { p1Dmg += 1; m += "⚔️P2カウンター成功！ "; } // 当たり
+      else { p2Dmg += 1; m += "💀P2はブラフに釣られた！ "; } // ハズレ
+    } else { // P2「相手c1は『嘘』だ！」
+      if (c1 === 0) { p1Dmg += 1; m += "🧠P2は嘘を見破った！ "; } // 当たり
+      else { p2Dmg += 1; m += "🗡️P2は正直な攻撃を受けた！ "; } // ハズレ
+    }
 
-    // 文字列としてカード名を送信（main.jsの書き換えを不要にするため）
+    room.p1Hp -= p1Dmg;
+    room.p2Hp -= p2Dmg;
+
+    // HP表示をハートのアイコンで送信
+    const p1HpHeart = "❤️".repeat(Math.max(0, room.p1Hp)) + "🖤".repeat(Math.max(0, 3 - room.p1Hp));
+    const p2HpHeart = "❤️".repeat(Math.max(0, room.p2Hp)) + "🖤".repeat(Math.max(0, 3 - room.p2Hp));
+
+    // 結果を送信（カード名は送らず、画像で表示するためIDのみ送る）
     io.to(roomId).emit('turnResult', {
-      p1Card: cardNames[c1], 
-      p2Card: cardNames[c2], 
-      p1Hp: room.p1Hp, 
-      p2Hp: room.p2Hp, 
-      message: msg
+      p1Card: c1, p2Card: c2,
+      p1Judge: j1, p2Judge: j2,
+      p1Hp: p1HpHeart, p2Hp: p2HpHeart, message: m
     });
 
     if (room.p1Hp <= 0 || room.p2Hp <= 0) {
@@ -119,12 +115,12 @@ io.on('connection', (socket) => {
       io.to(roomId).emit('gameOver', winner);
       delete rooms[roomId];
     } else {
+      // リセットして次のターンへ
       room.p1Card = null; room.p2Card = null;
+      room.p1Judge = null; room.p2Judge = null;
     }
   }
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`サーバー起動: ポート${PORT}`);
-});
+server.listen(PORT, () => console.log(`JUDGEMENT起動: ${PORT}`));
