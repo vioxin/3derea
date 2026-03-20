@@ -4,7 +4,6 @@ const { Server } = require('socket.io');
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server);
 
 // Renderのスリープ防止用エンドポイント (GASがここを叩きます)
 app.get('/ping', (req, res) => {
