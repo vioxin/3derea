@@ -110,18 +110,32 @@ io.on('connection', (socket) => {
         if (!isMyTurn && !msg.startsWith('タッパー') && !msg.startsWith('ハムサハム')) return;
 
         // 🌟 ラトンの処理ルート
+        // 🌟 ラトンの処理ルート
         if (player.commandState === 'awaiting_raton_dir') {
             const dir = DIR_VOCAB[msg];
             if (dir) {
-                // 交換
                 const handIdx = player.ratonHandIndex;
+                
+                // 🌟 ① アニメーションの合図を全員に送る
+                io.to(roomId).emit('animateSwap', { 
+                    playerId: player.id, 
+                    playerDir: player.direction, 
+                    handIndex: handIdx, 
+                    targetDir: dir 
+                });
+
+                // 実際のデータ交換
                 const temp = player.hand[handIdx];
                 player.hand[handIdx] = room.fieldCards[dir];
                 room.fieldCards[dir] = temp;
                 
                 player.commandState = 'awaiting_ratomu';
                 socket.emit('systemMessage', `【交換完了】続けて「ラトムー」と詠唱してターンを終了してください。`);
-                updateClientState(roomId);
+                
+                // 🌟 ② アニメーションが終わるまで（0.6秒）画面の更新を待つ
+                setTimeout(() => {
+                    updateClientState(roomId);
+                }, 600);
             }
             return;
         }
