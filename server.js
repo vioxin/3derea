@@ -4,123 +4,140 @@ const { Server } = require('socket.io');
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "*", methods: ["GET", "POST"] } });
+const io = new Server(server);
 
-app.get('/ping', (req, res) => res.send('Awake!'));
-
-const rooms = {};
-
-io.on('connection', (socket) => {
-  socket.on('createRoom', () => {
-    const roomId = Math.random().toString(36).substring(2, 6).toUpperCase();
-    socket.join(roomId);
-    rooms[roomId] = { p1: socket.id, p2: null, p1Hp: 3, p2Hp: 3, p1Card: null, p2Card: null, p1Judge: null, p2Judge: null, isCpu: false };
-    socket.emit('roomCreated', roomId);
-  });
-
-  socket.on('joinRoom', (roomId) => {
-    if (rooms[roomId] && !rooms[roomId].p2) {
-      socket.join(roomId);
-      rooms[roomId].p2 = socket.id;
-      io.to(roomId).emit('gameStart', '審判の時が来た。真実か嘘かを見破れ。');
-    } else {
-      socket.emit('errorMsg', '部屋がないか、満室です');
-    }
-  });
-
-  socket.on('playCPU', () => {
-    const roomId = 'CPU_' + socket.id;
-    socket.join(roomId);
-    rooms[roomId] = { p1: socket.id, p2: 'CPU', p1Hp: 3, p2Hp: 3, p1Card: null, p2Card: null, p1Judge: null, p2Judge: null, isCpu: true };
-    socket.emit('gameStart', 'CPUとの審判が始まった...。');
-  });
-
-  // ① カードを伏せるフェーズ
-  socket.on('faceDownCard', ({ roomId, card }) => {
-    const room = rooms[roomId];
-    if (!room) return;
-    if (socket.id === room.p1) room.p1Card = parseInt(card); // 0=Bluff, 1=Attack
-    if (socket.id === room.p2) room.p2Card = parseInt(card);
-
-    if (room.isCpu && socket.id === room.p1) {
-      room.p2Card = Math.floor(Math.random() * 2); // CPUはランダムに伏せる
-    }
-
-    // 両者が伏せたら、判定フェーズへ移行
-    if (room.p1Card !== null && room.p2Card !== null) {
-      io.to(roomId).emit('judgementPhase');
-    }
-  });
-
-  // ② 判定（真実か嘘か）を送るフェーズ
-  socket.on('submitJudgement', ({ roomId, judgement }) => {
-    const room = rooms[roomId];
-    if (!room) return;
-    if (socket.id === room.p1) room.p1Judge = parseInt(judgement); // 1=Truth, 0=Lie
-    if (socket.id === room.p2) room.p2Judge = parseInt(judgement);
-
-    if (room.isCpu && socket.id === room.p1) {
-      room.p2Judge = Math.floor(Math.random() * 2); // CPUはランダムに判定
-    }
-
-    // 両者が判定を送ったら、解決フェーズへ移行
-    if (room.p1Judge !== null && room.p2Judge !== null) {
-      resolveTurn(roomId);
-    }
-  });
-
-  function resolveTurn(roomId) {
-    const room = rooms[roomId];
-    const c1 = room.p1Card; const c2 = room.p2Card;
-    const j1 = room.p1Judge; const j2 = room.p2Judge;
-    let p1Dmg = 0; let p2Dmg = 0;
-    let m = "";
-
-    // 勝敗判定ロジック（マトリックス）
-    
-    // P1の判定結果 (相手のカードc2をどう読んだかj1)
-    if (j1 === 1) { // P1「相手c2は『真実』だ！」
-      if (c2 === 1) { p2Dmg += 1; m += "⚔️P1カウンター成功！ "; } // 当たり
-      else { p1Dmg += 1; m += "💀P1はブラフに釣られた！ "; } // ハズレ
-    } else { // P1「相手c2は『嘘』だ！」
-      if (c2 === 0) { p2Dmg += 1; m += "🧠P1は嘘を見破った！ "; } // 当たり
-      else { p1Dmg += 1; m += "🗡️P1は正直な攻撃を受けた！ "; } // ハズレ
-    }
-
-    // P2の判定結果 (相手のカードc1をどう読んだかj2)
-    if (j2 === 1) { // P2「相手c1は『真実』だ！」
-      if (c1 === 1) { p1Dmg += 1; m += "⚔️P2カウンター成功！ "; } // 当たり
-      else { p2Dmg += 1; m += "💀P2はブラフに釣られた！ "; } // ハズレ
-    } else { // P2「相手c1は『嘘』だ！」
-      if (c1 === 0) { p1Dmg += 1; m += "🧠P2は嘘を見破った！ "; } // 当たり
-      else { p2Dmg += 1; m += "🗡️P2は正直な攻撃を受けた！ "; } // ハズレ
-    }
-
-    room.p1Hp -= p1Dmg;
-    room.p2Hp -= p2Dmg;
-
-    // HP表示をハートのアイコンで送信
-    const p1HpHeart = "❤️".repeat(Math.max(0, room.p1Hp)) + "🖤".repeat(Math.max(0, 3 - room.p1Hp));
-    const p2HpHeart = "❤️".repeat(Math.max(0, room.p2Hp)) + "🖤".repeat(Math.max(0, 3 - room.p2Hp));
-
-    // 結果を送信（カード名は送らず、画像で表示するためIDのみ送る）
-    io.to(roomId).emit('turnResult', {
-      p1Card: c1, p2Card: c2,
-      p1Judge: j1, p2Judge: j2,
-      p1Hp: p1HpHeart, p2Hp: p2HpHeart, message: m
-    });
-
-    if (room.p1Hp <= 0 || room.p2Hp <= 0) {
-      let winner = room.p1Hp > 0 ? 'P1' : (room.p2Hp > 0 ? 'P2' : 'Draw');
-      io.to(roomId).emit('gameOver', winner);
-      delete rooms[roomId];
-    } else {
-      // リセットして次のターンへ
-      room.p1Card = null; room.p2Card = null;
-      room.p1Judge = null; room.p2Judge = null;
-    }
-  }
+// Renderのスリープ防止用エンドポイント (GASがここを叩きます)
+app.get('/ping', (req, res) => {
+    res.status(200).send('Pong! Server is awake.');
 });
 
+// 静的ファイルの提供 (publicフォルダ内のindex.htmlを読み込む)
+app.use(express.static('public'));
+
+const COLORS = ['桃色', '青色', '緑色', '黄色'];
+const SYMBOLS = ['ハティロン(ピラミッド)', 'アノン(目玉)', 'ドーン(太陽)', 'ヤール(アミュレット)'];
+const NUMBERS = [1, 2, 3, 4, 5];
+const DIRECTIONS = ['N(ニルポ)', 'E(エルポ)', 'S(サルポ)', 'W(ワルポ)'];
+
+// ルーム管理
+const rooms = {};
+
+// デッキ生成
+function createDeck() {
+    let deck = [];
+    COLORS.forEach(c => SYMBOLS.forEach(s => NUMBERS.forEach(n => deck.push({ color: c, symbol: s, number: n }))));
+    return deck.sort(() => Math.random() - 0.5); // シャッフル
+}
+
+io.on('connection', (socket) => {
+    socket.on('joinRoom', (roomId) => {
+        socket.join(roomId);
+        if (!rooms[roomId]) {
+            rooms[roomId] = { players: [], deck: createDeck(), fieldCard: null, turnIndex: 0, isForan: false };
+            rooms[roomId].fieldCard = rooms[roomId].deck.pop(); // 最初の中央カード
+        }
+
+        const room = rooms[roomId];
+        const dir = DIRECTIONS[room.players.length % 4];
+        
+        // プレイヤー追加
+        room.players.push({
+            id: socket.id,
+            isCpu: false,
+            direction: dir,
+            hand: [room.deck.pop(), room.deck.pop(), room.deck.pop()],
+            score: 0
+        });
+
+        io.to(roomId).emit('systemMessage', `🟢 プレイヤーが ${dir} の位置で参加しました。`);
+        
+        // 4人に満たない場合、CPUを追加して開始
+        if (room.players.length === 1) {
+            setTimeout(() => fillWithCPU(roomId), 2000);
+        }
+        
+        updateClientState(roomId);
+    });
+
+    socket.on('chatCommand', ({ roomId, message }) => {
+        const msg = message.trim();
+        const room = rooms[roomId];
+        if (!room) return;
+
+        // コマンド判定ロジック (簡易版)
+        if (msg.match(/^(ラトン|フォラン|ムー|ラトムー|フォラムー|ムールガイ)$/)) {
+            io.to(roomId).emit('systemMessage', `🗣️ ${socket.id.substring(0,4)} が詠唱: 「${msg}」`);
+            
+            // 状態の切り替え
+            if (msg === 'フォラン') {
+                room.isForan = !room.isForan;
+                io.to(roomId).emit('systemMessage', `🌌 場が ${room.isForan ? '【冥界(フォラン)】' : '【現世(未フォラン)】'} になりました！`);
+            }
+            if (msg.includes('ムー')) {
+                nextTurn(roomId); // ターン終了
+            }
+            updateClientState(roomId);
+        } else {
+            socket.emit('systemMessage', `❌ 無効なコマンド: ${msg}`);
+        }
+    });
+
+    socket.on('callAshuratteru', (roomId) => {
+        // アシュラッテル判定
+        const room = rooms[roomId];
+        let correct = room.players.some(p => p.id !== socket.id && p.hand.reduce((a, b) => a + b.number, 0) === 10);
+        if (correct) {
+            io.to(roomId).emit('systemMessage', `⚡ アシュラッテル成功！ ${socket.id.substring(0,4)} がポイント獲得！`);
+        } else {
+            socket.emit('systemMessage', `❌ アシュラッテル失敗...該当者なし。`);
+        }
+    });
+});
+
+function fillWithCPU(roomId) {
+    const room = rooms[roomId];
+    while (room.players.length < 4) {
+        room.players.push({
+            id: `CPU_${room.players.length}`,
+            isCpu: true,
+            direction: DIRECTIONS[room.players.length],
+            hand: [room.deck.pop(), room.deck.pop(), room.deck.pop()],
+            score: 0
+        });
+    }
+    io.to(roomId).emit('systemMessage', `🤖 人数が足りないため、CPUが参加しました。ゲーム開始！`);
+    updateClientState(roomId);
+    runCpuTurn(roomId);
+}
+
+function nextTurn(roomId) {
+    const room = rooms[roomId];
+    room.turnIndex = (room.turnIndex + 1) % 4;
+    io.to(roomId).emit('systemMessage', `➡️ 次は ${room.players[room.turnIndex].direction} のターンです。`);
+    runCpuTurn(roomId);
+}
+
+function runCpuTurn(roomId) {
+    const room = rooms[roomId];
+    const currentPlayer = room.players[room.turnIndex];
+    if (currentPlayer.isCpu) {
+        setTimeout(() => {
+            // CPUはとりあえず「ムー」でターンを回す（拡張可能）
+            io.to(roomId).emit('systemMessage', `🗣️ ${currentPlayer.direction}(CPU) が詠唱: 「ムー」`);
+            nextTurn(roomId);
+            updateClientState(roomId);
+        }, 3000);
+    }
+}
+
+function updateClientState(roomId) {
+    const room = rooms[roomId];
+    io.to(roomId).emit('updateState', { 
+        isForan: room.isForan,
+        players: room.players,
+        fieldCard: room.fieldCard
+    });
+}
+
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`JUDGEMENT起動: ${PORT}`));
+server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
