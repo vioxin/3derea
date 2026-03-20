@@ -240,13 +240,28 @@ io.on('connection', (socket) => {
 
 function updateClientState(roomId) {
     const room = rooms[roomId];
-    io.to(roomId).emit('updateState', { 
-        gameState: room.gameState, 
-        isForan: room.isForan,
-        players: room.players.map(p => ({ ...p, commandState: p.commandState, hand: (room.gameState === 'gameover' || p.id === io.sockets.sockets.keys().next().value) ? p.hand : [null, null, null] })), 
-        fieldCards: room.fieldCards,
-        turnIndex: room.turnIndex,
-        redstoneActive: room.redstoneActive 
+    
+    // ルーム内のプレイヤーごとに、自分専用のデータを送る
+    room.players.forEach(targetPlayer => {
+        if (targetPlayer.isCpu) return; // CPUには送信不要
+
+        // そのプレイヤー専用のデータを作成
+        const customState = { 
+            gameState: room.gameState, 
+            isForan: room.isForan,
+            players: room.players.map(p => ({ 
+                ...p, 
+                commandState: p.commandState, 
+                // 👇 ゲーム終了時、または「自分自身の手札」なら中身を送る。他人の手札は裏(null)
+                hand: (room.gameState === 'gameover' || p.id === targetPlayer.id) ? p.hand : [null, null, null] 
+            })), 
+            fieldCards: room.fieldCards,
+            turnIndex: room.turnIndex,
+            redstoneActive: room.redstoneActive 
+        };
+
+        // ルーム全体(roomId)ではなく、特定のプレイヤー(targetPlayer.id)にだけ個別に送信
+        io.to(targetPlayer.id).emit('updateState', customState);
     });
 }
 
