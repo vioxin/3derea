@@ -4,179 +4,230 @@ const { Server } = require('socket.io');
 
 const app = express();
 const server = http.createServer(app);
+const io = new Server(server, { cors: { origin: "*", methods: ["GET", "POST"] } });
 
-// 🌐 CORS設定 (GitHub Pagesと通信するための許可)
-const io = new Server(server, {
-    cors: {
-        origin: "*", // テスト用。本番では "https://あなたのユーザー名.github.io" を指定推奨
-        methods: ["GET", "POST"]
-    }
-});
-
-// 🔌 Renderのスリープ防止用エンドポイント (重複分を削除してスッキリさせました)
-app.get('/ping', (req, res) => {
-    res.status(200).send('Pong! Server is awake.');
-});
-
-// 静的ファイルの提供
+app.get('/ping', (req, res) => res.status(200).send('Pong!'));
 app.use(express.static('public'));
 
 const COLORS = ['桃色', '青色', '緑色', '黄色'];
-const SYMBOLS = ['ハティロン(ピラミッド)', 'アノン(目玉)', 'ドーン(太陽)', 'ヤール(アミュレット)'];
+const SYMBOLS = ['ハティロン', 'アノン', 'ドーン', 'ヤール']; // 判定しやすく簡略化
 const NUMBERS = [1, 2, 3, 4, 5];
-const DIRECTIONS = ['N(ニルポ)', 'E(エルポ)', 'S(サルポ)', 'W(ワルポ)'];
+const DIRECTIONS = ['N', 'E', 'S', 'W'];
+const DIR_VOCAB = { 'ニルポ': 'N', 'エルポ': 'E', 'サルポ': 'S', 'ワルポ': 'W' };
 
-// ルーム管理
 const rooms = {};
 
-// デッキ生成とシャッフル
 function createDeck() {
     let deck = [];
     COLORS.forEach(c => SYMBOLS.forEach(s => NUMBERS.forEach(n => deck.push({ color: c, symbol: s, number: n }))));
     return deck.sort(() => Math.random() - 0.5); 
 }
 
+// 🧮 スコア計算ロジック
+function calculateScore(hand, isForan) {
+    if (isForan) {
+        return hand.reduce((sum, card) => sum + card.number, 0);
+    } else {
+        let score = 0;
+        const nums = hand.map(c => c.number).sort((a,b) => a-b);
+        const cols = hand.map(c => c.color);
+        
+        // 階段
+        if (nums[0] + 1 === nums[1] && nums[1] + 1 === nums[2]) score += 1;
+        // 数字一致
+        if (nums[0] === nums[1] && nums[1] === nums[2]) score += 2;
+        else if (nums[0] === nums[1] || nums[1] === nums[2]) score += 1;
+        // 色一致
+        if (cols[0] === cols[1] && cols[1] === cols[2]) score += 2;
+        else if (cols[0] === cols[1] || cols[1] === cols[2] || cols[0] === cols[2]) score += 1;
+        
+        return score;
+    }
+}
+
 io.on('connection', (socket) => {
-    
-    // 🚪 1. ルーム入室（名前を受け取り、待機ロビーに入れるように変更）
     socket.on('joinRoom', ({ roomId, playerName }) => {
         socket.join(roomId);
         if (!rooms[roomId]) {
-            // gameState: 'lobby' を追加して、待機中であることを管理
-            rooms[roomId] = { players: [], deck: createDeck(), fieldCard: null, turnIndex: 0, isForan: false, gameState: 'lobby' };
-            rooms[roomId].fieldCard = rooms[roomId].deck.pop(); 
+            rooms[roomId] = { 
+                players: [], deck: createDeck(), 
+                fieldCards: { N: null, E: null, S: null, W: null },
+                turnIndex: 0, isForan: false, gameState: 'lobby', redstoneActive: true,
+                murugaiTriggerId: null // ムールガイ発動者の記憶用
+            };
+            DIRECTIONS.forEach(dir => rooms[roomId].fieldCards[dir] = rooms[roomId].deck.pop());
         }
 
         const room = rooms[roomId];
-        
-        // エラーチェック（すでにゲーム中、または満員なら弾く）
         if (room.gameState !== 'lobby') return socket.emit('errorMsg', 'すでにゲームが開始されています。');
         if (room.players.length >= 4) return socket.emit('errorMsg', 'ルームが満員です。');
 
         const dir = DIRECTIONS[room.players.length];
-        
-        // プレイヤーデータの拡張
         room.players.push({
-            id: socket.id,
-            name: playerName || `探求者${socket.id.substring(0,4)}`, // 画面で入力した名前を設定
-            isCpu: false,
-            direction: dir,
+            id: socket.id, name: playerName || `探求者${socket.id.substring(0,4)}`,
+            isCpu: false, direction: dir,
             hand: [room.deck.pop(), room.deck.pop(), room.deck.pop()],
-            score: 0,
-            hasRedstone: true // UIのランプ表示用
+            score: 0, commandState: 'idle', ratonHandIndex: -1
         });
 
-        io.to(roomId).emit('systemMessage', `🟢 ${room.players.at(-1).name} が入室しました。`);
+        io.to(roomId).emit('systemMessage', `🟢 ${room.players.at(-1).name} (${dir}) が入室しました。`);
         updateClientState(roomId);
     });
 
-    // ⚔️ 2. ゲーム開始処理（ホストがボタンを押したら開始するように変更）
     socket.on('startGame', (roomId) => {
         const room = rooms[roomId];
-        if (!room || room.players[0].id !== socket.id) return; // 1番目の人(ホスト)以外は無視
-        
-        room.gameState = 'playing'; // 状態をゲーム中に変更
-        
-        if (room.players.length < 4) {
-            fillWithCPU(roomId); // 4人未満ならCPUで埋める
-        } else {
-            io.to(roomId).emit('systemMessage', `⚔️ 儀式開始！ 最初は ${room.players[0].name} のターンです。`);
+        if (!room || room.players[0].id !== socket.id) return; 
+        room.gameState = 'playing';
+        io.to(roomId).emit('systemMessage', `⚔️ 儀式開始！ 最初は ${room.players[0].name} のターンです。`);
+        updateClientState(roomId);
+    });
+
+    // 🖱️ 右クリックでのカード選択 (ラトン時のみ有効)
+    socket.on('rightClickHand', ({ roomId, index }) => {
+        const room = rooms[roomId];
+        if (!room || room.gameState !== 'playing') return;
+        const player = room.players.find(p => p.id === socket.id);
+
+        if (player.commandState === 'awaiting_raton_click') {
+            player.ratonHandIndex = index;
+            player.commandState = 'awaiting_raton_dir';
+            socket.emit('systemMessage', `【ラトン継続】手札が選択されました。交換する場の方角（ニルポ/サルポ/ワルポ/エルポ）を詠唱してください。`);
             updateClientState(roomId);
-            runCpuTurn(roomId);
         }
     });
 
-    // 🗣️ 3. チャットコマンド（ゲーム中のみ反応するように変更）
     socket.on('chatCommand', ({ roomId, message }) => {
         const room = rooms[roomId];
         if (!room || room.gameState !== 'playing') return; 
-
+        
         const msg = message.trim();
         const player = room.players.find(p => p.id === socket.id);
+        const isMyTurn = room.players[room.turnIndex].id === socket.id;
 
-        if (msg.match(/^(ラトン|フォラン|ムー|ラトムー|フォラムー|ムールガイ)$/)) {
-            io.to(roomId).emit('systemMessage', `🗣️ ${player.name} が詠唱: 「${msg}」`);
-            
-            if (msg === 'フォラン') {
-                room.isForan = !room.isForan;
-                io.to(roomId).emit('systemMessage', `🌌 場が ${room.isForan ? '【冥界(フォラン)】' : '【現世(未フォラン)】'} になりました！`);
+        io.to(roomId).emit('systemMessage', `🗣️ ${player.name} : 「${msg}」`);
+
+        // 自分のターンでない時の発言は基本無視（チャットとしては流れる）
+        if (!isMyTurn && !msg.startsWith('タッパー') && !msg.startsWith('ハムサハム')) return;
+
+        // 🌟 ラトンの処理ルート
+        if (player.commandState === 'awaiting_raton_dir') {
+            const dir = DIR_VOCAB[msg];
+            if (dir) {
+                // 交換
+                const handIdx = player.ratonHandIndex;
+                const temp = player.hand[handIdx];
+                player.hand[handIdx] = room.fieldCards[dir];
+                room.fieldCards[dir] = temp;
+                
+                player.commandState = 'awaiting_ratomu';
+                socket.emit('systemMessage', `【交換完了】続けて「ラトムー」と詠唱してターンを終了してください。`);
+                updateClientState(roomId);
             }
-            if (msg.includes('ムー')) {
-                nextTurn(roomId); 
-            }
+            return;
+        }
+
+        if (player.commandState === 'awaiting_ratomu' && msg === 'ラトムー') {
+            player.commandState = 'idle';
+            nextTurn(roomId);
+            return;
+        }
+
+        if (player.commandState === 'awaiting_foramu' && msg === 'フォラムー') {
+            player.commandState = 'idle';
+            nextTurn(roomId);
+            return;
+        }
+
+        // 🌟 基本詠唱
+        if (msg === 'ラトン') {
+            player.commandState = 'awaiting_raton_click';
+            socket.emit('systemMessage', `【ラトン発動】交換したい手札を「右クリック」してください。`);
             updateClientState(roomId);
-        } else {
-            socket.emit('systemMessage', `❌ 無効なコマンド: ${msg}`);
+        }
+        else if (msg === 'フォラン') {
+            room.isForan = !room.isForan;
+            player.commandState = 'awaiting_foramu';
+            io.to(roomId).emit('systemMessage', `🌌 場が ${room.isForan ? '【冥界】' : '【現世】'} に反転した！「フォラムー」と詠唱してください。`);
+            updateClientState(roomId);
+        }
+        else if (msg === 'ムー') {
+            nextTurn(roomId);
+        }
+        else if (msg === 'ムールガイ') {
+            room.murugaiTriggerId = socket.id;
+            io.to(roomId).emit('systemMessage', `⚠️ 【ムールガイ発動】次回の ${player.name} のターン開始時に儀式は終了する...！`);
+            nextTurn(roomId);
+        }
+        // 🌟 レッドストーン消費技
+        else if (msg.startsWith('タッパー')) {
+            if (!room.redstoneActive) return socket.emit('systemMessage', '❌ レッドストーンはすでに消費されています。');
+            const targetSymbol = SYMBOLS.find(s => msg.includes(s));
+            if (targetSymbol) {
+                room.redstoneActive = false; // 消費
+                io.to(roomId).emit('systemMessage', `💥 【タッパー発動】全ての手札の ${targetSymbol} がランダムなカードに変異した！`);
+                // 全員の対象カードをすり替える処理
+                room.players.forEach(p => {
+                    p.hand = p.hand.map(c => c.symbol === targetSymbol ? room.deck.pop() : c);
+                });
+                updateClientState(roomId);
+            }
+        }
+        else if (msg.startsWith('ハムサハム')) {
+            if (!room.redstoneActive) return socket.emit('systemMessage', '❌ レッドストーンはすでに消費されています。');
+            room.redstoneActive = false; // 消費
+            io.to(roomId).emit('systemMessage', `👁️ 【ハムサハム発動】${player.name} から時計回りに、手札の最大数値を宣言せよ！`);
+            updateClientState(roomId);
         }
     });
 
-    // ⚡ 4. アシュラッテル（スコア加算処理を追加）
     socket.on('callAshuratteru', (roomId) => {
         const room = rooms[roomId];
-        if (!room || room.gameState !== 'playing') return;
-
+        if (!room || room.gameState !== 'gameover') return; // 終了時のみ可能
         const player = room.players.find(p => p.id === socket.id);
         let correct = room.players.some(p => p.id !== socket.id && p.hand.reduce((a, b) => a + b.number, 0) === 10);
         
         if (correct) {
-            player.score += 1; // 正解ならスコアをプラス
-            io.to(roomId).emit('systemMessage', `⚡ アシュラッテル成功！ ${player.name} がポイントを獲得しました！`);
+            player.score += 1;
+            io.to(roomId).emit('systemMessage', `⚡ アシュラッテル成功！ ${player.name} が1点獲得！`);
+            updateClientState(roomId);
         } else {
-            socket.emit('systemMessage', `❌ アシュラッテル失敗...条件を満たす者はいません。`);
+            socket.emit('systemMessage', `❌ 失敗。合計10の者はいなかった。`);
         }
-        updateClientState(roomId);
     });
 });
 
-// 🤖 CPUの補充と行動（名前をかっこよくしました）
-function fillWithCPU(roomId) {
-    const room = rooms[roomId];
-    while (room.players.length < 4) {
-        room.players.push({
-            id: `CPU_${room.players.length}`,
-            name: `🤖 自動人形 ${DIRECTIONS[room.players.length]}`,
-            isCpu: true,
-            direction: DIRECTIONS[room.players.length],
-            hand: [room.deck.pop(), room.deck.pop(), room.deck.pop()],
-            score: 0,
-            hasRedstone: true
-        });
-    }
-    io.to(roomId).emit('systemMessage', `🤖 人数が足りないため、自動人形が参加しました。儀式開始！`);
-    updateClientState(roomId);
-    runCpuTurn(roomId);
-}
-
 function nextTurn(roomId) {
     const room = rooms[roomId];
-    room.turnIndex = (room.turnIndex + 1) % 4;
-    io.to(roomId).emit('systemMessage', `➡️ 次は ${room.players[room.turnIndex].name} のターンです。`);
-    runCpuTurn(roomId);
-}
-
-function runCpuTurn(roomId) {
-    const room = rooms[roomId];
-    const currentPlayer = room.players[room.turnIndex];
-    if (currentPlayer.isCpu && room.gameState === 'playing') {
-        setTimeout(() => {
-            io.to(roomId).emit('systemMessage', `🗣️ ${currentPlayer.name} が詠唱: 「ムー」`);
-            nextTurn(roomId);
-            updateClientState(roomId);
-        }, 3000);
+    room.turnIndex = (room.turnIndex + 1) % room.players.length;
+    
+    // ムールガイ発動者が再びターンを迎えたらゲーム終了
+    if (room.players[room.turnIndex].id === room.murugaiTriggerId) {
+        room.gameState = 'gameover';
+        io.to(roomId).emit('systemMessage', `🛑 儀式終了！ 全員の手札を公開せよ！`);
+        
+        // 全員のスコア計算
+        room.players.forEach(p => {
+            p.score += calculateScore(p.hand, room.isForan);
+        });
+        updateClientState(roomId);
+        return;
     }
+    
+    io.to(roomId).emit('systemMessage', `➡️ ${room.players[room.turnIndex].name} のターン。`);
+    updateClientState(roomId);
 }
 
-// 📡 画面側に最新データを送る処理（誰のターンかの情報等を追加）
 function updateClientState(roomId) {
     const room = rooms[roomId];
     io.to(roomId).emit('updateState', { 
         gameState: room.gameState, 
         isForan: room.isForan,
-        players: room.players,
-        fieldCard: room.fieldCard,
-        turnIndex: room.turnIndex
+        players: room.players.map(p => ({ ...p, commandState: p.commandState, hand: (room.gameState === 'gameover' || p.id === io.sockets.sockets.keys().next().value) ? p.hand : [null, null, null] })), // 自分以外は裏向きにする(簡易実装)
+        fieldCards: room.fieldCards,
+        turnIndex: room.turnIndex,
+        redstoneActive: room.redstoneActive 
     });
 }
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+server.listen(PORT, () => console.log(`Server on port ${PORT}`));
