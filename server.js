@@ -10,7 +10,19 @@ const io = new Server(server);
 app.get('/ping', (req, res) => {
     res.status(200).send('Pong! Server is awake.');
 });
+const io = new Server(server, {
+    cors: {
+        // "あなたのユーザー名" の部分を実際のGitHubのものに変更してください。
+        // （テスト中は "*" にするとどこからでも繋がりますが、本番はURLを指定するのが安全です）
+        origin: "https://あなたのユーザー名.github.io", 
+        methods: ["GET", "POST"]
+    }
+});
 
+// Renderのスリープ防止用エンドポイント
+app.get('/ping', (req, res) => {
+    res.status(200).send('Pong! Server is awake.');
+});
 // 静的ファイルの提供 (publicフォルダ内のindex.htmlを読み込む)
 app.use(express.static('public'));
 
